@@ -1,0 +1,321 @@
+Всевозможный пердолинг Xray. Xray по vless и vmess через клаудфлер, а так же по vless в йоба XTLS режиме чтобы было еще быстрее. (бонусом голые теневые носочки иксрей эдишн)
+
+-1. Зочем?
+В отличии от Shadowsocks с v2ray плагином умеет в обфускацию udp, по заявлениям разрабов более производителен за счет устранения лишнего слоя шифрования в случае с VLESS, а так же доработки ошибок v2ray с которого xray и был форкнут; проще установка и настройка т.к. отпадает необходимость как в пердолинге самого SS так и в обмазывании его всевозможными плагинами, никакого зоопарка, один конфиг файл. В случае с VMESS результат будет идентичен этому https://pastebin.com/CpKBhNC3, только без лишней прослойки в виде shadowsocks и с меньшими телодвижениями.
+
+0. Подготовка:
+Получаем фриномовский домен и привязываем его к клаудфлер, см 1 и 2 части инструкции ss over cf в шапке ( https://telegra.ph/shadowsocks-over-cloudflare-05-17 )
+Помимо этого в дашборде CF нужно добавить поддомен - A запись webgame указывающая на ip впски и для этой же записи под proxy status переключить тумблер в состояние DNS Only.
+
+1. Устанавливаем xray и nginx на своей впсочке:
+Коннектимся к серверу, в консоли на своей пеке вводим:
+ssh root@<ip впски> - попросит пароль от рута
+sudo apt update && sudo apt upgrade
+sudo apt -y install curl git nginx libnginx-mod-stream - ставим вебсервер и прочие штуки которые нам понадобятся
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install - ставим xray
+cd /var/www
+git clone https://github.com/gd4Ark/2048.git 2048 - наша страничка-пустышка для товарища фринома/товарища майора/товарища Xi.
+
+2. Настраиваем nginx (<домен> заменить на свой домен):
+sudo rm /etc/nginx/sites-available/default && sudo rm /etc/nginx/sites-enabled/default - удаляем дефолтный конфиг
+sudo nano /etc/nginx/sites-available/<домен> - вставляем следующее
+
+server {
+    listen 80;
+    #listen [::]:80;
+    server_name <домен>;
+    root /var/www/2048;
+    index index.html;
+}
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo ln -s /etc/nginx/sites-available/<домен> /etc/nginx/sites-enabled/ - включаем сайт
+sudo nano /etc/nginx/sites-available/webgame.<домен> - вставляем следующее
+
+server {
+    listen 80;
+    #listen [::]:80;
+    server_name webgame.<домен>;
+    root /var/www/2048;
+    index index.html;
+}
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo ln -s /etc/nginx/sites-available/webgame.<домен> /etc/nginx/sites-enabled/ - включаем сайт
+sudo systemctl restart nginx - рестартим энжиникс
+
+3. Получаем lets encrypt сертификат (<домен> заменить на свой домен):
+sudo apt install snapd
+sudo snap install --classic certbot
+sudo ln -s /snap/bin/certbot /usr/bin/certbot
+sudo certbot --nginx - делаем два раза, для основного домена и для поддомена.
+
+Копируем сертификаты в удобное для xray место и делаем копирование автоматическим при их обновлении
+nano /etc/letsencrypt/renewal-hooks/post/001-copy-cert.sh - вставляем:
+
+#!/bin/bash
+cp /etc/letsencrypt/live/webgame.<домен>/fullchain.pem /usr/local/etc/xray/fullchain.pem
+cp /etc/letsencrypt/live/webgame.<домен>/privkey.pem /usr/local/etc/xray/privkey.pem
+chown nobody:nogroup /usr/local/etc/xray/fullchain.pem
+chown nobody:nogroup /usr/local/etc/xray/privkey.pem
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo sh /etc/letsencrypt/renewal-hooks/post/001-copy-cert.sh
+
+4.Еще раз правим конфиги nginx (<домен> заменить на свой домен):
+sudo nano /etc/nginx/nginx.conf - вставляем в самый конец
+
+stream {
+        map $ssl_preread_server_name $example_multi {
+                webgame.<домен> xtls;
+                <домен> xrayovercf;
+        }
+        upstream xtls {
+                server 127.0.0.1:20001;
+        }
+        upstream xrayovercf {
+                server 127.0.0.1:20002;
+        }
+        server {
+                listen 443      reuseport;
+                #listen [::]:443 reuseport;
+                proxy_pass      $example_multi;
+                ssl_preread     on;
+        }
+}
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo nano /etc/nginx/sites-available/<домен> - удаляем все и вставляем следующее
+
+server {
+        listen 80;
+        server_name <домен>;
+        if ($host = <домен>) {
+                return 301 https://$host$request_uri;
+        }
+        return 404;
+}
+
+server {
+        listen 127.0.0.1:20002 ssl;
+        server_name <домен>;
+        index index.html;
+        root /var/www/2048;
+
+        ssl_certificate /etc/letsencrypt/live/<домен>/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/<домен>/privkey.pem;
+        include /etc/letsencrypt/options-ssl-nginx.conf;
+        ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+        location /vless {
+        	proxy_redirect off;
+        	proxy_http_version 1.1;
+        	proxy_pass http://localhost:11111;
+        	proxy_set_header Host $http_host;
+        	proxy_set_header Upgrade $http_upgrade;
+        	proxy_set_header Connection "upgrade";
+        }
+
+        location /vmess {
+        	proxy_redirect off;
+        	proxy_http_version 1.1;
+        	proxy_pass http://localhost:11112;
+        	proxy_set_header Host $http_host;
+        	proxy_set_header Upgrade $http_upgrade;
+        	proxy_set_header Connection "upgrade";
+        }
+
+}
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo nano /etc/nginx/sites-available/webgame.<домен> - удаляем все и вставляем следующее
+
+server {
+        listen 80;
+        server_name webgame.<домен>;
+        if ($host = webgame.<домен>) {
+                return 301 https://$host$request_uri;
+        }
+        return 404;
+}
+
+server {
+        listen 127.0.0.1:20009;
+        server_name webgame.<домен>;
+        index index.html;
+        root /var/www/2048;
+}
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo systemctl restart nginx - рестартим энжиникс
+
+5. Настраиваем xray:
+cat /proc/sys/kernel/random/uuid - генерим uuid и куда-нибудь сохраняем, это будет наш пароль.
+sudo nano /usr/local/etc/xray/config.json - вставляем следующее (не забываем менять <пароль> на сгенерированный uuid):
+
+{
+    "inbounds": [
+        {
+            "port": 8080,
+            "protocol": "shadowsocks",
+            "settings": {
+                "clients": [
+                    {
+                        "password": "<пароль>",
+                        "method": "chacha20-poly1305"
+                    }
+                ],
+                "network": "tcp,udp"
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 20001,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "<пароль>",
+                        "flow": "xtls-rprx-direct",
+                        "level": 0
+                    }
+                ],
+                "decryption": "none",
+                "fallbacks": [
+                    {
+                        "dest": "20009" # port of fallback site
+                    }
+                 ]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "xtls",
+                "xtlsSettings": {
+                    "alpn": [
+                        "http/1.1"
+                    ],
+                    "certificates": [
+                        {
+                            "certificateFile": "/usr/local/etc/xray/fullchain.pem", # your domain cert, absolute path
+                            "keyFile": "/usr/local/etc/xray/privkey.pem" # your private key, absolute path
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "port": 11111,
+            "listen": "127.0.0.1",
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "<пароль>",
+                        "level": 0
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "none",
+                "wsSettings": {
+                    "path": "/vless"
+                }
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 11112,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "<пароль>",
+                        "alterId": 64
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "chacha20-poly1305",
+                "wsSettings": {
+                    "path": "/vmess"
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom"
+        }
+    ]
+}
+
+Сохраняем ctrl + o, закрываем ctrl + x
+sudo systemctl restart xray - рестартим иксрей.
+
+
+5. Настраиваем клиент:
+Пользователи виндовс берут клиент тут - https://github.com/2dust/v2rayN и распаковывают в удобное место. Если вместо интерфейса иероглифы, нажать на знак вопроса и выбрать ангельский язык. В настройках - Core: basic setting - смотрим какой у нас локальный порт и  убеждаемся что стоит галочка напротив Enable UDP, в v2rayN settings - ставим галку напротив Automatically start at system startup и убеждаемся что Core Type выбран Xray.
+
+Добавляем shadowsocks - кнопка Servers - Add [Shadowsocks] server:
+Server Address - ip впски
+Server Port - 8080
+Password - вспоминаем наш сгенерированый выше UUID
+Encryption - chacha20-poly1305
+Alias - shadowsocks@<ip впски>:8080
+
+Добавляем VLESS XTLS - кнопка Servers - Add [VLESS] server:
+Address - webgame.<домен>
+Port - 443
+UUID - вспоминаем наш сгенерированый выше UUID
+Flow - xtls-rprx-direct
+Encryption - none
+Alias - XTLS@webgame.<домен>:443
+Transport protocol - tcp
+Camouflage type - none
+Camouflage domain - webgame.<домен>
+Path - оставляем пустым
+TLS - xtls 
+allowInsecure - false
+Остальное не трогаем
+
+Добавляем VLESS через CF - кнопка Servers - Add [VLESS] server:
+Address - <домен>
+Port - 443
+UUID - вспоминаем наш сгенерированый выше UUID
+Flow - пусто
+Encryption - none
+Alias - VLESSoverCF@<домен>:443
+Transport protocol - ws
+Camouflage type - none
+Camouflage domain - <домен>
+Path - /vless
+TLS - tls 
+allowInsecure - false
+Остальное не трогаем
+
+Добавляем VMESS через CF - кнопка Servers - Add [VMess] server:
+Address - <домен>
+Port - 443
+UUID - вспоминаем наш сгенерированый выше UUID
+Flow - пусто
+Encryption - chacha20-poly1305
+Alias - VMESSoverCF@<домен>:443
+Transport protocol - ws
+Camouflage type - none
+Camouflage domain - <домен>
+Path - /vmess
+TLS - tls
+allowInsecure - false
+Остальное не трогаем
+
+Для андроида существует https://github.com/2dust/v2rayNG - можно взять в гугловском плей сторе под тем же названием.
+На яблоко есть Shadowrocket
+Линуксоиды ебyтся в консолечку, как - написано на гитхабе проекта.
+
+7. Настраиваем клаудфлер:
+В настройках своего домена на cloudflare, в разделе Crypto ставим Full(strict).
+Переходим на свой сайт, убеждаемся, что все работает.
+
+Ставим прокси расширение для браузера (например Proxy SwitchyOmega, протокол - socks5, сервер - 127.0.0.1, порт - 1080)
